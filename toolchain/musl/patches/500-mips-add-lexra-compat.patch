@@ -1,0 +1,251 @@
+From 69d27c58defb81fd8f4840190dd2b1b1b0a14221 Mon Sep 17 00:00:00 2001
+From: Weijie Gao <hackpascal@gmail.com>
+Date: Fri, 17 Feb 2017 02:17:35 +0800
+Subject: [PATCH] mips: add lexra compat
+
+Fix load instruction interlock for lexra architecture
+
+Signed-off-by: Weijie Gao <hackpascal@gmail.com>
+---
+ arch/mips/crt_arch.h         | 32 ++++++++++++++++++++++++++++++++
+ arch/mips/reloc.h            | 19 +++++++++++++++++++
+ crt/mips/crtn.s              | 16 ++++++++++++++++
+ src/fenv/mips/fenv.S         |  3 +++
+ src/ldso/mips/dlsym.s        |  3 +++
+ src/setjmp/mips/longjmp.S    |  6 ++++++
+ src/signal/mips/sigsetjmp.s  |  9 +++++++++
+ src/thread/mips/syscall_cp.s | 12 ++++++++++++
+ src/unistd/mips/pipe.s       |  3 +++
+ 9 files changed, 103 insertions(+)
+
+diff --git a/arch/mips/crt_arch.h b/arch/mips/crt_arch.h
+index 9fc50d7..f747822 100644
+--- a/arch/mips/crt_arch.h
++++ b/arch/mips/crt_arch.h
+@@ -1,3 +1,4 @@
++#ifndef __mlexra
+ __asm__(
+ ".set push\n"
+ ".set noreorder\n"
+@@ -27,3 +28,34 @@ __asm__(
+ "	 subu $sp, $sp, 16 \n"
+ ".set pop \n"
+ );
++#else
++__asm__(
++".set push\n"
++".set noreorder\n"
++".text \n"
++".global _" START "\n"
++".global " START "\n"
++".type   _" START ", @function\n"
++".type   " START ", @function\n"
++"_" START ":\n"
++"" START ":\n"
++"	bal 1f \n"
++"	 move $fp, $0 \n"
++"	.gpword . \n"
++"	.gpword " START "_c \n"
++".weak _DYNAMIC \n"
++".hidden _DYNAMIC \n"
++"	.gpword _DYNAMIC \n"
++"1:	lw $gp, 0($ra) \n"
++"	move $4, $sp \n"
++"	subu $gp, $ra, $gp \n"
++"	lw $5, 8($ra) \n"
++"	lw $25, 4($ra) \n"
++"	addu $5, $5, $gp \n"
++"	addu $25, $25, $gp \n"
++"	and $sp, $sp, -8 \n"
++"	jalr $25 \n"
++"	 subu $sp, $sp, 16 \n"
++".set pop \n"
++);
++#endif /* !__mlexra */
+diff --git a/arch/mips/reloc.h b/arch/mips/reloc.h
+index b3d59a4..ef3be8e 100644
+--- a/arch/mips/reloc.h
++++ b/arch/mips/reloc.h
+@@ -36,6 +36,7 @@
+ #define CRTJMP(pc,sp) __asm__ __volatile__( \
+ 	"move $sp,%1 ; jr %0" : : "r"(pc), "r"(sp) : "memory" )
+ 
++#ifndef __mlexra
+ #define GETFUNCSYM(fp, sym, got) __asm__ ( \
+ 	".hidden " #sym "\n" \
+ 	".set push \n" \
+@@ -50,3 +51,21 @@
+ 	"	addu %0, %0, $ra \n" \
+ 	".set pop \n" \
+ 	: "=r"(*(fp)) : : "memory", "ra" )
++#else
++#define GETFUNCSYM(fp, sym, got) __asm__ ( \
++	".hidden " #sym "\n" \
++	".set push \n" \
++	".set noreorder \n" \
++	"	bal 1f \n" \
++	"	 nop \n" \
++	"	.gpword . \n" \
++	"	.gpword " #sym " \n" \
++	"1:	lw %0, ($ra) \n" \
++	"	nop \n" \
++	"	subu %0, $ra, %0 \n" \
++	"	lw $ra, 4($ra) \n" \
++	"	nop \n" \
++	"	addu %0, %0, $ra \n" \
++	".set pop \n" \
++	: "=r"(*(fp)) : : "memory", "ra" )
++#endif /* !__mlexra */
+diff --git a/crt/mips/crtn.s b/crt/mips/crtn.s
+index 506a04b..0aefc0c 100644
+--- a/crt/mips/crtn.s
++++ b/crt/mips/crtn.s
+@@ -1,5 +1,6 @@
+ .set noreorder
+ 
++#ifndef __mlexra
+ .section .init
+ 	lw $gp,24($sp)
+ 	lw $ra,28($sp)
+@@ -11,3 +12,18 @@
+ 	lw $ra,28($sp)
+ 	j $ra
+ 	addu $sp,$sp,32
++#else /* __mlexra */
++.section .init
++	lw $gp,24($sp)
++	lw $ra,28($sp)
++	addu $sp,$sp,32
++	j $ra
++	nop
++
++.section .fini
++	lw $gp,24($sp)
++	lw $ra,28($sp)
++	addu $sp,$sp,32
++	j $ra
++	nop
++#endif /* __mlexra */
+diff --git a/src/fenv/mips/fenv.S b/src/fenv/mips/fenv.S
+index a5cb1f5..c62f299 100644
+--- a/src/fenv/mips/fenv.S
++++ b/src/fenv/mips/fenv.S
+@@ -64,6 +64,9 @@ fesetenv:
+ 	beq     $5, $0, 1f
+ 	 nop
+ 	lw      $5, 0($4)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 1:	ctc1    $5, $31
+ 	jr      $ra
+ 	li      $2, 0
+diff --git a/src/ldso/mips/dlsym.s b/src/ldso/mips/dlsym.s
+index 1573e51..8d5f544 100644
+--- a/src/ldso/mips/dlsym.s
++++ b/src/ldso/mips/dlsym.s
+@@ -13,5 +13,8 @@ dlsym:
+ 	jalr $25
+ 	nop
+ 	lw $ra, 12($sp)
++#ifdef __mlexra
++	nop
++#endif
+ 	jr $ra
+ 	addiu $sp, $sp, 16
+diff --git a/src/setjmp/mips/longjmp.S b/src/setjmp/mips/longjmp.S
+index fdb6c95..86bc832 100644
+--- a/src/setjmp/mips/longjmp.S
++++ b/src/setjmp/mips/longjmp.S
+@@ -36,5 +36,11 @@ longjmp:
+ 	lw      $22, 32($4)
+ 	lw      $23, 36($4)
+ 	lw      $30, 40($4)
++#ifndef __mlexra
+ 	jr      $ra
+ 	lw      $28, 44($4)
++#else
++	lw      $28, 44($4)
++	jr      $ra
++	nop
++#endif /* !__mlexra */
+diff --git a/src/signal/mips/sigsetjmp.s b/src/signal/mips/sigsetjmp.s
+index 74b65ff..de2bb77 100644
+--- a/src/signal/mips/sigsetjmp.s
++++ b/src/signal/mips/sigsetjmp.s
+@@ -15,6 +15,9 @@ __sigsetjmp:
+ 	sw $16, 104+4+16($4)
+ 
+ 	lw $25, %call16(setjmp)($gp)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 	jalr $25
+ 	 move $16, $4
+ 
+@@ -25,9 +28,15 @@ __sigsetjmp:
+ 
+ .hidden __sigsetjmp_tail
+ 	lw $25, %call16(__sigsetjmp_tail)($gp)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 	jr $25
+ 	 nop
+ 
+ 1:	lw $25, %call16(setjmp)($gp)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 	jr $25
+ 	 nop
+diff --git a/src/thread/mips/syscall_cp.s b/src/thread/mips/syscall_cp.s
+index d284626..d0c2dcd 100644
+--- a/src/thread/mips/syscall_cp.s
++++ b/src/thread/mips/syscall_cp.s
+@@ -17,6 +17,9 @@ __syscall_cp_asm:
+ 	subu    $sp, $sp, 32
+ __cp_begin:
+ 	lw      $4, 0($4)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 	bne     $4, $0, __cp_cancel
+ 	move    $2, $5
+ 	move    $4, $6
+@@ -45,9 +48,18 @@ __cp_cancel:
+ 	addu    $sp, $sp, 32
+ 	.gpword .
+ 	.gpword __cancel
++#ifndef __mlexra
+ 1:	lw      $3, ($ra)
+ 	subu    $3, $ra, $3
+ 	lw      $25, 4($ra)
+ 	addu    $25, $25, $3
+ 	jr      $25
+ 	move    $ra, $2
++#else
++1:	lw      $3, ($ra)
++	lw      $25, 4($ra)
++	subu    $3, $ra, $3
++	addu    $25, $25, $3
++	jr      $25
++	move    $ra, $2
++#endif /* !__mlexra */
+diff --git a/src/unistd/mips/pipe.s b/src/unistd/mips/pipe.s
+index ba2c39a..ed10f9a 100644
+--- a/src/unistd/mips/pipe.s
++++ b/src/unistd/mips/pipe.s
+@@ -11,6 +11,9 @@ pipe:
+ 	beq $7, $0, 1f
+ 	nop
+ 	lw $25, %call16(__syscall_ret)($gp)
++#ifdef __mlexra
++	nop
++#endif /* __mlexra */
+ 	jr $25
+ 	subu $4, $0, $2
+ 1:	sw $2, 0($4)
+-- 
+2.5.0
+
