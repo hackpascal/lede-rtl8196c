@@ -1,0 +1,363 @@
+--- a/bfd/bfd-in2.h
++++ b/bfd/bfd-in2.h
+@@ -2019,6 +2019,7 @@ enum bfd_architecture
+ #define bfd_mach_mipsisa64r5           68
+ #define bfd_mach_mipsisa64r6           69
+ #define bfd_mach_mips_micromips        96
++#define bfd_mach_mips_lexra            4180
+   bfd_arch_i386,      /* Intel 386 */
+ #define bfd_mach_i386_intel_syntax     (1 << 0)
+ #define bfd_mach_i386_i8086            (1 << 1)
+--- a/bfd/cpu-mips.c
++++ b/bfd/cpu-mips.c
+@@ -104,7 +104,8 @@ enum
+   I_mipsocteon2,
+   I_mipsocteon3,
+   I_xlr,
+-  I_micromips
++  I_micromips,
++  I_lexra,
+ };
+ 
+ #define NN(index) (&arch_info_struct[(index) + 1])
+@@ -155,7 +156,8 @@ static const bfd_arch_info_type arch_inf
+   N (64, 64, bfd_mach_mips_octeon2,"mips:octeon2",  FALSE, NN(I_mipsocteon2)),
+   N (64, 64, bfd_mach_mips_octeon3, "mips:octeon3",  FALSE, NN(I_mipsocteon3)),
+   N (64, 64, bfd_mach_mips_xlr, "mips:xlr",       FALSE, NN(I_xlr)),
+-  N (64, 64, bfd_mach_mips_micromips,"mips:micromips",FALSE,0)
++  N (64, 64, bfd_mach_mips_micromips, "mips:micromips", FALSE, NN(I_micromips)),
++  N (32, 32, bfd_mach_mips_lexra, "mips:lexra",   FALSE, 0)
+ };
+ 
+ /* The default architecture is mips:3000, but with a machine number of
+--- a/gas/config/tc-mips.c
++++ b/gas/config/tc-mips.c
+@@ -1351,6 +1351,7 @@ static int relaxed_branch_length (fragS
+ static int relaxed_micromips_16bit_branch_length (fragS *, asection *, int);
+ static int relaxed_micromips_32bit_branch_length (fragS *, asection *, int);
+ static void file_mips_check_options (void);
++static inline int lexra_is_insn_swappable (const struct mips_cl_insn *, const struct mips_cl_insn *);
+ 
+ /* Table and functions used to map between CPU/ISA names, and
+    ISA levels, and CPU numbers.  */
+@@ -2668,6 +2669,18 @@ struct regname {
+ #define MIPS16_SPECIAL_REGISTER_NAMES \
+     {"$pc",	RTYPE_PC | 0}
+ 
++#define LEXRA_REGISTER_ALIAS_NAMES \
++    {"$estatus",	RTYPE_GP | 0}, \
++    {"$ecause",		RTYPE_GP | 1}, \
++    {"$intvec",		RTYPE_GP | 2}, \
++    {"$cvstag",		RTYPE_GP | 3},  \
++    {"$bpctl",		RTYPE_GP | 4},  \
++    {"$wmpctl",		RTYPE_GP | 5},  \
++    {"$wmpstatus",	RTYPE_GP | 6},  \
++    {"$wmpvaddr",	RTYPE_GP | 7},  \
++    {"$tlptr",		RTYPE_GP | 8},  \
++    {"$wmpextramask",	RTYPE_GP | 19}
++
+ #define MDMX_VECTOR_REGISTER_NAMES \
+     /* {"$v0",	RTYPE_VEC | 0},  clash with REG 2 above */ \
+     /* {"$v1",	RTYPE_VEC | 1},  clash with REG 3 above */ \
+@@ -2733,6 +2746,7 @@ static const struct regname reg_names[]
+   SYMBOLIC_REGISTER_NAMES,
+ 
+   MIPS16_SPECIAL_REGISTER_NAMES,
++  LEXRA_REGISTER_ALIAS_NAMES,
+   MDMX_VECTOR_REGISTER_NAMES,
+   R5900_I_NAMES,
+   R5900_Q_NAMES,
+@@ -4881,6 +4895,9 @@ convert_reg_type (const struct mips_opco
+ 
+     case OP_REG_MSA_CTRL:
+       return RTYPE_NUM;
++
++    case OP_REG_LXC0:
++      return RTYPE_NUM | RTYPE_CP0;
+     }
+   abort ();
+ }
+@@ -4925,6 +4942,13 @@ check_regno (struct mips_arg_info *arg,
+ 	as_warn (_("condition code register should be 0 or 4 for %s, was %d"),
+ 		 name, regno);
+     }
++
++  if (type == OP_REG_LXC0)
++    {
++      if (regno > 31)
++        as_bad (_("lxc0 register should be smaller than 32 for %s, was %d"),
++                arg->insn->insn_mo->name, regno);
++    }
+ }
+ 
+ /* ARG is a register with symbol value SYMVAL.  Try to interpret it as
+@@ -6514,6 +6538,35 @@ nops_for_insn (int ignore, const struct
+   return nops;
+ }
+ 
++static inline int
++lexra_is_insn_swappable (const struct mips_cl_insn *hist,
++                       const struct mips_cl_insn *insn)
++{
++
++  unsigned long pinfo1, pinfo2;
++
++  pinfo1 = hist[0].insn_mo->pinfo;
++  pinfo2 = hist[1].insn_mo->pinfo;
++
++  if (pinfo1 & INSN_LOAD_MEMORY || gpr_write_mask(&hist[0]))
++    {
++      if (gpr_read_mask (insn) & (1 << EXTRACT_OPERAND (mips_opts.micromips, RT, hist[0])))
++        {
++          return 1;
++        }
++    }
++
++  if (pinfo2 & INSN_LOAD_MEMORY || gpr_write_mask(&hist[0]))
++    {
++      if (gpr_read_mask (insn) & (1 << EXTRACT_OPERAND (mips_opts.micromips, RT, hist[1])))
++        {
++          return 1;
++        }
++    }
++
++  return 0;
++}
++
+ /* The variable arguments provide NUM_INSNS extra instructions that
+    might be added to HIST.  Return the largest number of nops that
+    would be needed after the extended sequence, ignoring hazards
+@@ -6694,6 +6747,9 @@ can_swap_branch_p (struct mips_cl_insn *
+      target of the branch.  */
+   if (nops_for_sequence (2, 0, history + 1, ip, history) > 0)
+     return FALSE;
++ 
++  if (lexra_is_insn_swappable (history, ip) > 0)
++    return FALSE;
+ 
+   /* If the branch reads a register that the previous
+      instruction sets, we can not swap.  */
+@@ -18861,6 +18920,9 @@ static const struct mips_cpu_info mips_c
+   { "i6400",	      0, ASE_MSA,		ISA_MIPS64R6, CPU_MIPS64R6},
+   { "p6600",	      0, ASE_VIRT | ASE_MSA,	ISA_MIPS64R6, CPU_MIPS64R6},
+ 
++  /* Lexra processors */
++  { "lexra",	      0, 0,			ISA_MIPS1,    CPU_LEXRA },
++
+   /* End marker */
+   { NULL, 0, 0, 0, 0 }
+ };
+--- a/include/opcode/mips.h
++++ b/include/opcode/mips.h
+@@ -478,7 +478,10 @@ enum mips_reg_operand_type {
+   OP_REG_MSA,
+ 
+   /* MSA control registers $0-$31.  */
+-  OP_REG_MSA_CTRL
++  OP_REG_MSA_CTRL,
++
++  /* Lexra lxc0 registers */
++  OP_REG_LXC0
+ };
+ 
+ /* Base class for all operands.  */
+@@ -1194,7 +1197,7 @@ static const unsigned int mips_isa_table
+ #undef ISAF
+ 
+ /* Masks used for Chip specific instructions.  */
+-#define INSN_CHIP_MASK		  0xc3ff0f20
++#define INSN_CHIP_MASK		  0xc3ff0f60
+ 
+ /* Cavium Networks Octeon instructions.  */
+ #define INSN_OCTEON		  0x00000800
+@@ -1235,6 +1238,9 @@ static const unsigned int mips_isa_table
+ /* RMI Xlr instruction */
+ #define INSN_XLR                 0x00000020
+ 
++/* Lexra instructions */
++#define INSN_LEXRA                0x00000040
++
+ /* DSP ASE */
+ #define ASE_DSP			0x00000001
+ #define ASE_DSP64		0x00000002
+@@ -1331,6 +1337,7 @@ static const unsigned int mips_isa_table
+ #define CPU_OCTEON2	6502
+ #define CPU_OCTEON3	6503
+ #define CPU_XLR     	887682   	/* decimal 'XLR'   */
++#define CPU_LEXRA	4180		/*  LX4180 */
+ 
+ /* Return true if the given CPU is included in INSN_* mask MASK.  */
+ 
+@@ -1401,6 +1408,9 @@ cpu_is_member (int cpu, unsigned int mas
+     case CPU_XLR:
+       return (mask & INSN_XLR) != 0;
+ 
++    case CPU_LEXRA:
++      return (mask & INSN_LEXRA) != 0;
++
+     case CPU_MIPS32R6:
+       return (mask & INSN_ISA_MASK) == INSN_ISA32R6;
+ 
+--- a/opcodes/mips16-opc.c
++++ b/opcodes/mips16-opc.c
+@@ -179,6 +179,8 @@ decode_mips16_operand (char type, bfd_bo
+ #define I64	INSN_ISA64
+ #define T3	INSN_3900
+ 
++#define LX	INSN_LEXRA
++
+ const struct mips_opcode mips16_opcodes[] =
+ {
+ /* name,    args,	match,	mask,		pinfo,	         	pinfo2, membership */
+@@ -223,6 +225,7 @@ const struct mips_opcode mips16_opcodes[
+ {"bne",     "x,I,p",	0, (int) M_BNE_I,	INSN_MACRO,		0,		I1,	0,	0 },
+ {"bnez",    "x,p",	0x2800, 0xf800,		RD_1,			CBR,		I1,	0,	0 },
+ {"break",   "6",	0xe805, 0xf81f,		TRAP,			0,		I1,	0,	0 },
++{"break",   "",		0xe805, 0xffff,		TRAP,			0,		LX,	0,	0 },
+ {"bteqz",   "p",	0x6000, 0xff00,		RD_T,			CBR,		I1,	0,	0 },
+ {"btnez",   "p",	0x6100, 0xff00,		RD_T,			CBR,		I1,	0,	0 },
+ {"cmpi",    "x,U",	0x7000, 0xf800,		RD_1|WR_T,		0,		I1,	0,	0 },
+@@ -307,10 +310,18 @@ const struct mips_opcode mips16_opcodes[
+ {"lw",	    "x,V(P)",	0xb000, 0xf800,		WR_1,			RD_PC,		I1,	0,	0 },
+ {"lw",	    "x,V(S)",	0x9000, 0xf800,		WR_1,			RD_SP,		I1,	0,	0 },
+ {"lwu",     "y,W(x)",	0xb800, 0xf800,		WR_1|RD_3, 		0,		I3,	0,	0 },
++{"madh",    "x,y",	0xf800, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"madl",    "x,y",	0xf802, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"mazh",    "x,y",	0xf804, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"mazl",    "x,y",	0xf806, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
+ {"mfhi",    "x",	0xe810, 0xf8ff,		WR_1|RD_HI,		0,		I1,	0,	0 },
+ {"mflo",    "x",	0xe812, 0xf8ff,		WR_1|RD_LO,		0,		I1,	0,	0 },
+ {"move",    "y,X",	0x6700, 0xff00,		WR_1|RD_2, 		0,		I1,	0,	0 },
+ {"move",    "Y,Z",	0x6500, 0xff00,		WR_1|RD_2,		0,		I1,	0,	0 },
++{"msbh",    "x,y",	0xf810, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"msbl",    "x,y",	0xf812, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"mszh",    "x,y",	0xf814, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
++{"mszl",    "x,y",	0xf816, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		LX,	0,	0 },
+ {"mul",     "z,v,y",	0, (int) M_MUL, 	INSN_MACRO,		0,		I1,	0,	0 },
+ {"mult",    "x,y",	0xe818, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		I1,	0,	0 },
+ {"multu",   "x,y",	0xe819, 0xf81f,		RD_1|RD_2|WR_HI|WR_LO,	0,		I1,	0,	0 },
+--- a/opcodes/mips-dis.c
++++ b/opcodes/mips-dis.c
+@@ -416,6 +416,15 @@ static const char * const msa_control_na
+   "$24",  "$25",  "$26",  "$27",  "$28",  "$29",  "$30",  "$31"
+ };
+ 
++static const char *const mips_cplxc0_names_alias[32] =
++{
++  "estatus",  "ecause",   "intvec",   "cvstag",
++  "bpctl", "wmpctl", "wmpstatus", "wmpvaddr",
++  "tlptr", "$9", "$10", "$11", "$12", "$13", "$14", "$15",
++  "$16", "$17", "$18", "wmpextramask", "$20", "$21", "$22", "$23",
++  "$24", "$25", "$26", "$27", "$28", "$29", "$30", "$31"
++};
++
+ struct mips_abi_choice
+ {
+   const char * name;
+@@ -656,6 +665,10 @@ const struct mips_arch_choice mips_arch_
+     mips_cp0sel_names_xlr, ARRAY_SIZE (mips_cp0sel_names_xlr),
+     mips_cp1_names_mips3264, mips_hwr_names_numeric },
+ 
++  /* Lexra processors */
++  { "lexra",	1, bfd_mach_mips_lexra, CPU_LEXRA, ISA_MIPS1, 0,
++    mips_cp0_names_numeric, NULL, 0, mips_hwr_names_numeric},
++
+   /* This entry, mips16, is here only for ISA/processor selection; do
+      not print its name.  */
+   { "",		1, bfd_mach_mips16, CPU_MIPS16, ISA_MIPS3, 0,
+@@ -1081,6 +1094,10 @@ print_reg (struct disassemble_info *info
+       info->fprintf_func (info->stream, "%s", msa_control_names[regno]);
+       break;
+ 
++    case OP_REG_LXC0:
++      info->fprintf_func (info->stream, "%s", mips_cplxc0_names_alias[regno]);
++      break;
++
+     }
+ }
+ 
+--- a/opcodes/mips-opc.c
++++ b/opcodes/mips-opc.c
+@@ -198,6 +198,7 @@ decode_mips_operand (const char *p)
+     case 'i': HINT (16, 0);
+     case 'j': SINT (16, 0);
+     case 'k': HINT (5, 16);
++    case 'l': REG (5, 11, LXC0);
+     case 'o': SINT (16, 0);
+     case 'p': BRANCH (16, 0, 2);
+     case 'q': HINT (10, 6);
+@@ -321,6 +322,7 @@ decode_mips_operand (const char *p)
+ #define IOCT2	(INSN_OCTEON2 | INSN_OCTEON3)
+ #define IOCT3	INSN_OCTEON3
+ #define XLR     INSN_XLR
++#define LX      INSN_LEXRA
+ #define IVIRT	ASE_VIRT
+ #define IVIRT64	ASE_VIRT64
+ 
+@@ -999,7 +1001,7 @@ const struct mips_opcode mips_builtin_op
+ /* dctr and dctw are used on the r5000.  */
+ {"dctr",		"o(b)",	 	0xbc050000, 0xfc1f0000, RD_2,			0,		I3,		0,	0 },
+ {"dctw",		"o(b)",		0xbc090000, 0xfc1f0000, RD_2,			0,		I3,		0,	0 },
+-{"deret",		"",		0x4200001f, 0xffffffff, NODS, 			0,		I32|G2,		0,	0 },
++{"deret",		"",		0x4200001f, 0xffffffff, NODS, 			0,		I32|G2|LX,	0,	0 },
+ {"dext",		"t,r,+A,+H",	0x7c000003, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 },
+ {"dext",		"t,r,+A,+G",	0x7c000001, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 }, /* dextm */
+ {"dext",		"t,r,+E,+H",	0x7c000002, 0xfc00003f, WR_1|RD_2,    		0,		I65,		0,	0 }, /* dextu */
+@@ -1319,8 +1321,8 @@ const struct mips_opcode mips_builtin_op
+ {"maccu",		"d,s,t",	0x00000068, 0xfc0007ff,	WR_1|RD_2|RD_3|WR_HILO,	     0,		N412,		0,	0 },
+ {"maccu",		"d,s,t",	0x00000159, 0xfc0007ff, WR_1|RD_2|RD_3|WR_HILO,	     0,		N5,		0,	0 },
+ {"maccus",		"d,s,t",	0x00000468, 0xfc0007ff,	WR_1|RD_2|RD_3|WR_HILO,	     0,		N412,		0,	0 },
+-{"mad",			"s,t",		0x70000000, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3,		0,	0 },
+-{"madu",		"s,t",		0x70000001, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3,		0,	0 },
++{"mad",			"s,t",		0x70000000, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3|LX,		0,	0 },
++{"madu",		"s,t",		0x70000001, 0xfc00ffff, RD_1|RD_2|MOD_HILO,	     0,		P3|LX,		0,	0 },
+ {"madd.d",		"D,R,S,T",	0x4c000021, 0xfc00003f, WR_1|RD_2|RD_3|RD_4|FP_D,    0,		I4_33,		0,	I37 },
+ {"madd.d",		"D,S,T",	0x46200018, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	     0,		IL2E,		0,	0 },
+ {"madd.d",		"D,S,T",	0x72200018, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	     0,		IL2F,		0,	0 },
+@@ -1462,11 +1464,11 @@ const struct mips_opcode mips_builtin_op
+ {"msub.ps",		"D,S,T",	0x45600019, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	0,		IL2E,		0,	0 },
+ {"msub.ps",		"D,S,T",	0x72c00019, 0xffe0003f,	WR_1|RD_2|RD_3|FP_D,	0,		IL2F,		0,	0 },
+ {"msub",		"s,t",		0x0000001e, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		L1,		0,	0 },
+-{"msub",		"s,t",		0x70000004, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55,	0,	I37 },
++{"msub",		"s,t",		0x70000004, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55|LX,	0,	I37 },
+ {"msub",		"7,s,t",	0x70000004, 0xfc00e7ff, RD_2|RD_3|MOD_a,        0,              0,		D32,	0 },
+ {"msuba.s",		"S,T",		0x4600001f, 0xffe007ff,	RD_1|RD_2|FP_S,		0,		EE,		0,	0 },
+ {"msubu",		"s,t",		0x0000001f, 0xfc00ffff, RD_1|RD_2|WR_HILO,	0,		L1,		0,	0 },
+-{"msubu",		"s,t",		0x70000005, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55,	0,	I37 },
++{"msubu",		"s,t",		0x70000005, 0xfc00ffff, RD_1|RD_2|MOD_HILO,     0,		I32|N55|LX,	0,	I37 },
+ {"msubu",		"7,s,t",	0x70000005, 0xfc00e7ff, RD_2|RD_3|MOD_a,        0,              0,		D32,	0 },
+ {"mtbpc",		"t",		0x4080c000, 0xffe0ffff,	RD_1|WR_C0|CM,		0,		EE,		0,	0 },
+ {"mtdab",		"t",		0x4080c004, 0xffe0ffff,	RD_1|WR_C0|CM,		0,		EE,		0,	0 },
+@@ -1806,9 +1808,9 @@ const struct mips_opcode mips_builtin_op
+ {"sdbbp",		"c",		0x0000000e, 0xfc00ffff,	TRAP,			0,		G2,		0,	0 },
+ {"sdbbp",		"c,q",		0x0000000e, 0xfc00003f,	TRAP,			0,		G2,		0,	0 },
+ {"sdbbp",		"",		0x0000000e, 0xffffffff, TRAP,           	0,		I37,		0,	0 },
+-{"sdbbp",		"",		0x7000003f, 0xffffffff, TRAP,           	0,		I32,		0,	I37 },
++{"sdbbp",		"",		0x7000003f, 0xffffffff, TRAP,           	0,		I32|LX,		0,	I37 },
+ {"sdbbp",		"B",		0x0000000e, 0xfc00003f, TRAP,           	0,		I37,		0,	0 },
+-{"sdbbp",		"B",		0x7000003f, 0xfc00003f, TRAP,           	0,		I32,		0,	I37 },
++{"sdbbp",		"B",		0x7000003f, 0xfc00003f, TRAP,           	0,		I32|LX,		0,	I37 },
+ {"sdc1",		"T,o(b)",	0xf4000000, 0xfc000000, RD_1|RD_3|SM|FP_D,	0,		I2,		0,	SF },
+ {"sdc1",		"E,o(b)",	0xf4000000, 0xfc000000, RD_1|RD_3|SM|FP_D,	0,		I2,		0,	SF },
+ {"sdc1",		"T,A(b)",	0,    (int) M_SDC1_AB,	INSN_MACRO,		INSN2_M_FP_D,	I2,		0,	SF },
+@@ -3349,6 +3351,20 @@ const struct mips_opcode mips_builtin_op
+ {"cop3",		"C",		0,    (int) M_COP3,	INSN_MACRO,		0,		I1,		0,	IOCT|IOCTP|IOCT2 },
+ /* RFE conflicts with the new Virt spec instruction tlbgp. */
+ {"rfe",			"",		0x42000010, 0xffffffff,	0,			0,		I1|T3,		0,	0 },
++
++/* Lexra Coprocessor 0 operations, actually lx4180 does not support them */
++{"mflxc0",		"t,l",		0x40600000, 0xffe007ff, WR_1|RD_C0|LC,		0,		LX,		0,	0 },
++{"mtlxc0",		"t,l",		0x40e00000, 0xffe007ff, RD_1|WR_C0|CM,		0,		LX,		0,	0 },
++/* MAC-DIV */
++{"sleep",		"",		0x42000038, 0xffffffff, 0,			0,		LX,		0,	0 },
++{"madh",		"s,t",		0xf0000000, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"madl",		"s,t",		0xf0000002, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"mazh",		"s,t",		0xf0000004, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"mazl",		"s,t",		0xf0000006, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"msbh",		"s,t",		0xf0000010, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"msbl",		"s,t",		0xf0000012, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"mszh",		"s,t",		0xf0000014, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
++{"mszl",		"s,t",		0xf0000016, 0xfc00ffff, RD_1|RD_2,		0,		LX,		0,	0 },
+ };
+ 
+ #define MIPS_NUM_OPCODES \
