@@ -1,0 +1,204 @@
+Add support for lexra architecture (lx4180) support with minimum modifications
+
+--- a/gcc/config/mips/mips.c
++++ b/gcc/config/mips/mips.c
+@@ -7524,6 +7524,8 @@ mips_block_move_straight (rtx dest, rtx
+   if (MEM_ALIGN (src) == BITS_PER_WORD / 2
+       && MEM_ALIGN (dest) == BITS_PER_WORD / 2)
+     bits = BITS_PER_WORD / 2;
++  else if (TARGET_LEXRA)
++    bits = MIN (MEM_ALIGN (src), MEM_ALIGN (dest));
+   else
+     bits = BITS_PER_WORD;
+ 
+@@ -7895,6 +7897,8 @@ mips_expand_ext_as_unaligned_load (rtx d
+     }
+   else
+     {
++      if (TARGET_LEXRA)
++        return false;
+       emit_insn (gen_mov_lwl (temp, src, left));
+       emit_insn (gen_mov_lwr (dest, copy_rtx (src), right, temp));
+     }
+@@ -7938,6 +7942,8 @@ mips_expand_ins_as_unaligned_store (rtx
+     }
+   else
+     {
++      if (TARGET_LEXRA)
++        return false;
+       emit_insn (gen_mov_swl (dest, src, left));
+       emit_insn (gen_mov_swr (copy_rtx (dest), copy_rtx (src), right));
+     }
+@@ -17363,6 +17369,10 @@ mips_option_override (void)
+ 
+   if (mips_arch_info == 0)
+     mips_set_architecture (mips_default_arch ());
++ 
++  /* flag_fix_bdsl only works for Taroko processors */
++  if (flag_fix_bdsl && !TARGET_LEXRA)
++    flag_fix_bdsl = false;
+ 
+   if (ABI_NEEDS_64BIT_REGS && !ISA_HAS_64BIT_REGS)
+     error ("%<-march=%s%> is not compatible with the selected ABI",
+--- a/gcc/config/mips/mips-cpus.def
++++ b/gcc/config/mips/mips-cpus.def
+@@ -166,3 +166,6 @@ MIPS_CPU ("octeon+", PROCESSOR_OCTEON, 6
+ MIPS_CPU ("octeon2", PROCESSOR_OCTEON2, 65, PTF_AVOID_BRANCHLIKELY)
+ MIPS_CPU ("octeon3", PROCESSOR_OCTEON3, 65, PTF_AVOID_BRANCHLIKELY)
+ MIPS_CPU ("xlp", PROCESSOR_XLP, 65, PTF_AVOID_BRANCHLIKELY)
++
++/* Lexra processors */
++MIPS_CPU ("lexra", PROCESSOR_LEXRA, 1, 0)
+--- a/gcc/config/mips/mips.h
++++ b/gcc/config/mips/mips.h
+@@ -246,6 +246,7 @@ struct mips_cpu_info {
+ 				     || mips_arch == PROCESSOR_SB1A)
+ #define TARGET_SR71K                (mips_arch == PROCESSOR_SR71000)
+ #define TARGET_XLP                  (mips_arch == PROCESSOR_XLP)
++#define TARGET_LEXRA		    (mips_arch == PROCESSOR_LEXRA)
+ 
+ /* Scheduling target defines.  */
+ #define TUNE_20KC		    (mips_tune == PROCESSOR_20KC)
+@@ -259,7 +260,7 @@ struct mips_cpu_info {
+ #define TUNE_LOONGSON_2EF           (mips_tune == PROCESSOR_LOONGSON_2E	\
+ 				     || mips_tune == PROCESSOR_LOONGSON_2F)
+ #define TUNE_LOONGSON_3A            (mips_tune == PROCESSOR_LOONGSON_3A)
+-#define TUNE_MIPS3000               (mips_tune == PROCESSOR_R3000)
++#define TUNE_MIPS3000               (mips_tune == PROCESSOR_R3000 || TUNE_LEXRA)
+ #define TUNE_MIPS3900               (mips_tune == PROCESSOR_R3900)
+ #define TUNE_MIPS4000               (mips_tune == PROCESSOR_R4000)
+ #define TUNE_MIPS4120               (mips_tune == PROCESSOR_R4120)
+@@ -276,6 +277,7 @@ struct mips_cpu_info {
+ #define TUNE_SB1                    (mips_tune == PROCESSOR_SB1		\
+ 				     || mips_tune == PROCESSOR_SB1A)
+ #define TUNE_P5600                  (mips_tune == PROCESSOR_P5600)
++#define TUNE_LEXRA		    (mips_tune == PROCESSOR_LEXRA)
+ 
+ /* Whether vector modes and intrinsics for ST Microelectronics
+    Loongson-2E/2F processors should be enabled.  In o32 pairs of
+@@ -590,6 +592,13 @@ struct mips_cpu_info {
+ 									\
+       if (TARGET_CACHE_BUILTIN)						\
+ 	builtin_define ("__GCC_HAVE_BUILTIN_MIPS_CACHE");		\
++									\
++      if (TARGET_LEXRA)							\
++	builtin_define ("__mlexra");					\
++									\
++      if (flag_fix_bdsl)						\
++	builtin_define ("__FIX_BDSL__");				\
++									\
+     }									\
+   while (0)
+ 
+@@ -747,7 +756,7 @@ struct mips_cpu_info {
+   "%{mhard-float|msoft-float|mno-float|march=mips*:; \
+      march=vr41*|march=m4k|march=4k*|march=24kc|march=24kec \
+      |march=34kc|march=34kn|march=74kc|march=1004kc|march=5kc \
+-     |march=m14k*|march=octeon|march=xlr: -msoft-float;		  \
++     |march=m14k*|march=octeon|march=xlr|march=lexra: -msoft-float; \
+      march=*: -mhard-float}"
+ 
+ /* A spec condition that matches 32-bit options.  It only works if
+@@ -1032,7 +1041,8 @@ struct mips_cpu_info {
+ 				      && (MODE) == V2SFmode))		\
+ 				 && !TARGET_MIPS16)
+ 
+-#define ISA_HAS_LWL_LWR		(mips_isa_rev <= 5 && !TARGET_MIPS16)
++#define ISA_HAS_LWL_LWR		(mips_isa_rev <= 5 && !TARGET_MIPS16	\
++				 && !TARGET_LEXRA)
+ 
+ #define ISA_HAS_IEEE_754_LEGACY	(mips_isa_rev <= 5)
+ 
+@@ -1319,6 +1329,7 @@ FP_ASM_SPEC "\
+ 
+ #undef CC1_SPEC
+ #define CC1_SPEC "\
++%{mlexra:-march=lexra} \
+ %{G*} %{EB:-meb} %{EL:-mel} %{EB:%{EL:%emay not use both -EB and -EL}} \
+ %(subtarget_cc1_spec)"
+ 
+--- a/gcc/config/mips/mips.md
++++ b/gcc/config/mips/mips.md
+@@ -69,6 +69,7 @@
+   p5600
+   w32
+   w64
++  lexra
+ ])
+ 
+ (define_c_enum "unspec" [
+@@ -719,9 +720,13 @@
+ 
+ ;; Can the instruction be put into a delay slot?
+ (define_attr "can_delay" "no,yes"
+-  (if_then_else (and (eq_attr "type" "!branch,call,jump")
+-		     (eq_attr "hazard" "none")
+-		     (match_test "get_attr_insn_count (insn) == 1"))
++  (if_then_else (and (ior (eq (symbol_ref "TARGET_MIPS16") (const_int 0))
++			  (eq (symbol_ref "flag_fix_bdsl") (const_int 0)))
++		     (ior (eq_attr "type" "!load")
++			  (eq (symbol_ref "flag_fix_bdsl") (const_int 0)))
++		     (and (eq_attr "type" "!branch,call,jump")
++			  (eq_attr "hazard" "none")
++		 	  (match_test "get_attr_insn_count (insn) == 1")))
+ 		(const_string "yes")
+ 		(const_string "no")))
+ 
+@@ -4213,7 +4218,7 @@
+ 	(unspec:GPR [(match_operand:BLK 1 "memory_operand" "m")
+ 		     (match_operand:QI 2 "memory_operand" "ZC")]
+ 		    UNSPEC_LOAD_LEFT))]
+-  "!TARGET_MIPS16 && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
++  "!TARGET_MIPS16 && !TARGET_LEXRA && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
+   "<load>l\t%0,%2"
+   [(set_attr "move_type" "load")
+    (set_attr "mode" "<MODE>")])
+@@ -4224,7 +4229,7 @@
+ 		     (match_operand:QI 2 "memory_operand" "ZC")
+ 		     (match_operand:GPR 3 "register_operand" "0")]
+ 		    UNSPEC_LOAD_RIGHT))]
+-  "!TARGET_MIPS16 && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
++  "!TARGET_MIPS16 && !TARGET_LEXRA && mips_mem_fits_mode_p (<MODE>mode, operands[1])"
+   "<load>r\t%0,%2"
+   [(set_attr "move_type" "load")
+    (set_attr "mode" "<MODE>")])
+@@ -4234,7 +4239,7 @@
+ 	(unspec:BLK [(match_operand:GPR 1 "reg_or_0_operand" "dJ")
+ 		     (match_operand:QI 2 "memory_operand" "ZC")]
+ 		    UNSPEC_STORE_LEFT))]
+-  "!TARGET_MIPS16 && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
++  "!TARGET_MIPS16 && !TARGET_LEXRA && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
+   "<store>l\t%z1,%2"
+   [(set_attr "move_type" "store")
+    (set_attr "mode" "<MODE>")])
+@@ -4245,7 +4250,7 @@
+ 		     (match_operand:QI 2 "memory_operand" "ZC")
+ 		     (match_dup 0)]
+ 		    UNSPEC_STORE_RIGHT))]
+-  "!TARGET_MIPS16 && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
++  "!TARGET_MIPS16 && !TARGET_LEXRA && mips_mem_fits_mode_p (<MODE>mode, operands[0])"
+   "<store>r\t%z1,%2"
+   [(set_attr "move_type" "store")
+    (set_attr "mode" "<MODE>")])
+--- a/gcc/config/mips/mips.opt
++++ b/gcc/config/mips/mips.opt
+@@ -315,6 +315,10 @@ mmcu
+ Target Report Var(TARGET_MCU)
+ Use MCU instructions
+ 
++mno-bdsl
++Target Report Var(flag_fix_bdsl) Init(0)
++Forbid the use of load instructions in the branch delay slots for all cases
++
+ mno-flush-func
+ Target RejectNegative
+ Do not use a cache-flushing function before calling stack trampolines
+--- a/gcc/config/mips/mips-tables.opt
++++ b/gcc/config/mips/mips-tables.opt
+@@ -684,3 +684,6 @@ Enum(mips_arch_opt_value) String(octeon3
+ EnumValue
+ Enum(mips_arch_opt_value) String(xlp) Value(98) Canonical
+ 
++EnumValue
++Enum(mips_arch_opt_value) String(lexra) Value(99) Canonical
++
