@@ -1,3 +1,49 @@
+LEDE for RTL8196C
+
+这是一个未完成的项目，但是应该不会再更新了。
+
+此代码没有使用任何原始 Realtek SDK 的源码，全部根据其源码重写编写符合 Linux 和 LEDE 要求的 arch 和驱动程序。
+
+arch 部分预留了移植其它 RTL819X 芯片支持的空间。
+SPI 驱动使用标准 SPI 总线接口，配合 m25p80 以支持绝大多数的 SPI NOR 闪存。
+以太网驱动参照 ag71xx 的架构编写，交换机部分支持 switch 接口/swconfig 命令，但是不支持任何硬件加速功能（如 HWNAT）。
+以太网驱动的 MAC 地址是硬编码的，实际使用时请选择一种方法读取正确的值。
+
+没有合适的无线芯片驱动。rtl_wifi 无法支持 RTL8192DR，并且需要较大的内存才能使用。原厂 SDK 的 rtl8192cd 结构太差，不想移植（其实是不熟悉 mac80211 框架）。
+
+生成的固件分为 factory 和 sysupgrade。其中 factory 用于从原厂固件升级，或通过 bootcode 升级；sysupgrade 只能通过在 LEDE 中刷入。
+固件能够兼容 LEDE 的 rootfs split 功能，同时能通过 bootcode 的校验。
+
+工具链增加了 Lexra LX4180 支持，能够向上兼容其它的 Lexra 架构。对工具链的改动不影响其它的架构。
+
+!!!!注意!!!!
+请一定使用 uCLibc 作为固件的 C 库！
+musl 会导致 init 进程崩溃！
+
+================================================================================
+
+This is an unfinished project, and it's likely I'm not update it anymore.
+
+This code used no original codes from Realtek SDK. I rewrote all arch codes and drivers based on it, to fit standards from Linux and LEDE.
+
+The arch codes has reserved spaces to add support for other RTL819X SoCs.
+The SPI driver uses standard Linux SPI Bus interface, which can be used together with m25p80 to support most of the SPI NOR flashes.
+The ethernet driver used the ag71xx's framework as a reference. The switch driver supports the switch interface/swconfig command, and has no hardware acceleration supports (e.g. HWNAT).
+The ethernet driver uses hard-coded MAC address. Please change this when using it.
+
+There's no wireless support. The rtl_wifi driver cannot support RTL8192DR, and uses lots of memory to get work. The factory driver rtl8192cd has bad structures that I cannot port it to LEDE.
+
+The generated frimwares contain factory and sysupgrade. The factory firmware is used to upgrade from factory firmware or from the bootcode. The sysupgrade can only be upgraded from LEDE.
+The firmware supports rootfs split, and is also compatible with bootcode's validation.
+
+The toolchain adds support for Lexra LX4180, which is compatible with other Lexra architectures. The modification does not affect other architectures.
+
+!!!!IMPORTANT!!!!
+Please do use uClibc as the C library!
+musl can crash the init process!
+
+================================================================================
+
 This is the buildsystem for the LEDE Linux distribution.
 
 Please use "make menuconfig" to choose your preferred
